@@ -25,20 +25,34 @@ jobs:
           mkdir -p server/plugins
           cd server
 
-          build=$(curl --fail --silent --show-error \
-            "https://api.papermc.io/v2/projects/paper/versions/${MC_VERSION}/builds" \
-            | jq -r '.builds[-1].build')
-          jar_name="paper-${MC_VERSION}-${build}.jar"
+          paper_url=$(curl --fail --silent --show-error \
+            "https://fill.papermc.io/v3/projects/paper/versions/${MC_VERSION}/builds" \
+            | jq -r 'map(select(.channel == "STABLE"))[0].downloads["server:default"].url')
+          if [[ -z "$paper_url" || "$paper_url" == "null" ]]; then
+            echo "No stable Paper build found for ${MC_VERSION}." >&2
+            exit 1
+          fi
           curl --fail --location --show-error \
             --output paper.jar \
-            "https://api.papermc.io/v2/projects/paper/versions/${MC_VERSION}/builds/${build}/downloads/${jar_name}"
+            "$paper_url"
 
+          geyser_version=$(curl --fail --silent --show-error \
+            https://download.geysermc.org/v2/projects/geyser | jq -r '.versions[-1]')
+          geyser_build=$(curl --fail --silent --show-error \
+            "https://download.geysermc.org/v2/projects/geyser/versions/${geyser_version}/builds" \
+            | jq -r '.builds[-1].build')
           curl --fail --location --show-error \
             --output plugins/Geyser-Spigot.jar \
-            https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot
+            "https://download.geysermc.org/v2/projects/geyser/versions/${geyser_version}/builds/${geyser_build}/downloads/spigot"
+
+          floodgate_version=$(curl --fail --silent --show-error \
+            https://download.geysermc.org/v2/projects/floodgate | jq -r '.versions[-1]')
+          floodgate_build=$(curl --fail --silent --show-error \
+            "https://download.geysermc.org/v2/projects/floodgate/versions/${floodgate_version}/builds" \
+            | jq -r '.builds[-1].build')
           curl --fail --location --show-error \
             --output plugins/floodgate-spigot.jar \
-            https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot
+            "https://download.geysermc.org/v2/projects/floodgate/versions/${floodgate_version}/builds/${floodgate_build}/downloads/spigot"
 
           printf 'eula=true\n' > eula.txt
           printf 'server-port=%s\n' "$SERVER_PORT" > server.properties
@@ -79,13 +93,34 @@ jobs:
             exit 1
           fi
 
+          cd server
+          java -Xms1G -Xmx2G -jar paper.jar --nogui 2>&1 | tee server.log &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; docker rm --force minecraft-cloudflared 2>/dev/null || true' EXIT
+
+          for attempt in {1..90}; do
+            if grep -q 'Done (' server.log; then
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat server.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if ! grep -q 'Done (' server.log; then
+            echo 'Minecraft did not become ready within 180 seconds.' >&2
+            cat server.log
+            exit 1
+          fi
+
           docker run --rm --detach --name minecraft-cloudflared \
             --network host \
             cloudflare/cloudflared:latest \
             tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
 
-          cd server
-          exec java -Xms1G -Xmx2G -jar paper.jar --nogui
+          wait "$server_pid"
 
       - name: Stop Cloudflare Tunnel
         if: always()
