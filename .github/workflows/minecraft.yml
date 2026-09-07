@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
-      MC_VERSION: '1.21.8'
+      MC_VERSION: '1.21.11'
       SERVER_PORT: '25565'
 
     steps:
@@ -72,6 +72,11 @@ jobs:
             if ! kill -0 "$server_pid" 2>/dev/null; then
               cat first-start.log
               exit 1
+            fi
+            if (( attempt % 15 == 0 )); then
+              echo "Still waiting for Geyser config (${attempt}/90)..."
+              tail -20 first-start.log || true
+              find plugins -maxdepth 3 -type f -print || true
             fi
             sleep 2
           done
