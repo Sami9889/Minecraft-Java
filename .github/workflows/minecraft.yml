@@ -57,41 +57,6 @@ jobs:
           printf 'eula=true\n' > eula.txt
           printf 'server-port=%s\n' "$SERVER_PORT" > server.properties
 
-      - name: Generate and configure plugin settings
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd server
-          setsid java -Xms1G -Xmx2G -jar paper.jar --nogui > first-start.log 2>&1 &
-          server_pid=$!
-
-          for attempt in {1..90}; do
-            if [[ -f plugins/Geyser-Spigot/config.yml ]]; then
-              break
-            fi
-            if ! kill -0 "$server_pid" 2>/dev/null; then
-              cat first-start.log
-              exit 1
-            fi
-            if (( attempt % 15 == 0 )); then
-              echo "Still waiting for Geyser config (${attempt}/90)..."
-              tail -20 first-start.log || true
-              find plugins -maxdepth 3 -type f -print || true
-            fi
-            sleep 2
-          done
-
-          if [[ ! -f plugins/Geyser-Spigot/config.yml ]]; then
-            echo 'Geyser did not generate its configuration within 180 seconds.' >&2
-            cat first-start.log
-            kill -- "-$server_pid" 2>/dev/null || true
-            exit 1
-          fi
-
-          kill -- "-$server_pid" 2>/dev/null || true
-          wait "$server_pid" || true
-          sed -i 's/^  auth-type: online$/  auth-type: floodgate/' plugins/Geyser-Spigot/config.yml
-
       - name: Start Minecraft and Cloudflare Tunnel
         shell: bash
         env:
@@ -104,9 +69,29 @@ jobs:
           fi
 
           cd server
-          java -Xms1G -Xmx2G -jar paper.jar --nogui 2>&1 | tee server.log &
+          java -Xms1G -Xmx2G -jar paper.jar --nogui > server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; docker rm --force minecraft-cloudflared 2>/dev/null || true' EXIT
+
+          geyser_config_ready=false
+          for attempt in {1..90}; do
+            if [[ -f plugins/Geyser-Spigot/config.yml ]]; then
+              sed -i 's/^  auth-type: online$/  auth-type: floodgate/' plugins/Geyser-Spigot/config.yml
+              geyser_config_ready=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              cat server.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [[ "$geyser_config_ready" != true ]]; then
+            echo 'Geyser config was not generated within 180 seconds.' >&2
+            cat server.log
+            exit 1
+          fi
 
           for attempt in {1..90}; do
             if grep -q 'Done (' server.log; then
