@@ -1,0 +1,92 @@
+name: Minecraft Java server
+
+on:
+  workflow_dispatch:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      MC_VERSION: '1.21.8'
+      SERVER_PORT: '25565'
+
+    steps:
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download Paper, Geyser, and Floodgate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p server/plugins
+          cd server
+
+          build=$(curl --fail --silent --show-error \
+            "https://api.papermc.io/v2/projects/paper/versions/${MC_VERSION}/builds" \
+            | jq -r '.builds[-1].build')
+          jar_name="paper-${MC_VERSION}-${build}.jar"
+          curl --fail --location --show-error \
+            --output paper.jar \
+            "https://api.papermc.io/v2/projects/paper/versions/${MC_VERSION}/builds/${build}/downloads/${jar_name}"
+
+          curl --fail --location --show-error \
+            --output plugins/Geyser-Spigot.jar \
+            https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot
+          curl --fail --location --show-error \
+            --output plugins/floodgate-spigot.jar \
+            https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot
+
+          printf 'eula=true\n' > eula.txt
+          printf 'server-port=%s\n' "$SERVER_PORT" > server.properties
+
+      - name: Generate and configure plugin settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd server
+          java -Xms1G -Xmx2G -jar paper.jar --nogui > first-start.log 2>&1 &
+          server_pid=$!
+
+          for attempt in {1..60}; do
+            if [[ -f plugins/Geyser-Spigot/config.yml ]]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ ! -f plugins/Geyser-Spigot/config.yml ]]; then
+            cat first-start.log
+            kill "$server_pid" || true
+            exit 1
+          fi
+
+          kill "$server_pid" || true
+          wait "$server_pid" || true
+          sed -i 's/^  auth-type: online$/  auth-type: floodgate/' plugins/Geyser-Spigot/config.yml
+
+      - name: Start Minecraft and Cloudflare Tunnel
+        shell: bash
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]]; then
+            echo 'Missing CLOUDFLARE_TUNNEL_TOKEN repository secret.' >&2
+            exit 1
+          fi
+
+          docker run --rm --detach --name minecraft-cloudflared \
+            --network host \
+            cloudflare/cloudflared:latest \
+            tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
+
+          cd server
+          exec java -Xms1G -Xmx2G -jar paper.jar --nogui
+
+      - name: Stop Cloudflare Tunnel
+        if: always()
+        run: docker rm --force minecraft-cloudflared || true
